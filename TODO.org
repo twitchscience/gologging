@@ -1,0 +1,2 @@
+* gologging
+** TODO Rethink the construction process of the logger (specifically in relation to writer_controller)
