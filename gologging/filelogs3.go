@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/TwitchScience/aws_utils/uploader"
-	"github.com/TwitchScience/gologging/file_writer"
-	gen "github.com/TwitchScience/gologging/key_name_generator"
+	"github.com/twitchscience/aws_utils/uploader"
+	"github.com/twitchscience/gologging/file_writer"
+	gen "github.com/twitchscience/gologging/key_name_generator"
 )
 
 type RotateCoordinator struct {

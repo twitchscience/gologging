@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/TwitchScience/aws_utils/uploader"
-	"github.com/TwitchScience/gologging/gologging"
-	gen "github.com/TwitchScience/gologging/key_name_generator"
+	"github.com/twitchscience/aws_utils/uploader"
+	"github.com/twitchscience/gologging/gologging"
+	gen "github.com/twitchscience/gologging/key_name_generator"
 	"github.com/crowdmob/goamz/aws"
 	"github.com/crowdmob/goamz/s3"
 )

@@ -3,8 +3,8 @@ package gologging
 import (
 	"fmt"
 
-	"github.com/TwitchScience/aws_utils/uploader"
-	gen "github.com/TwitchScience/gologging/key_name_generator"
+	"github.com/twitchscience/aws_utils/uploader"
+	gen "github.com/twitchscience/gologging/key_name_generator"
 )
 
 type UploadLogger struct {

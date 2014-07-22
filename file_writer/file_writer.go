@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/TwitchScience/aws_utils/uploader"
+	"github.com/twitchscience/aws_utils/uploader"
 )
 
 type FileWriter struct {

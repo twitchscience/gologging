@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TwitchScience/aws_utils/uploader"
+	"github.com/twitchscience/aws_utils/uploader"
 )
 
 // This is the standard writer that prints to standard output.
