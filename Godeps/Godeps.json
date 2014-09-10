@@ -6,11 +6,7 @@
 	],
 	"Deps": [
 		{
-			"ImportPath": "github.com/twitchscience/aws_utils/common",
-			"Rev": "74ca435cd69fa5bfd87c24722f58885132664687"
-		},
-		{
-			"ImportPath": "github.com/twitchscience/aws_utils/uploader",
+			"ImportPath": "github.com/TwitchScience/aws_utils/common",
 			"Rev": "74ca435cd69fa5bfd87c24722f58885132664687"
 		},
 		{
@@ -20,6 +16,10 @@
 		{
 			"ImportPath": "github.com/crowdmob/goamz/s3",
 			"Rev": "c5ba9ad45b6ac022326f0ff9762d6bac33ca8f88"
+		},
+		{
+			"ImportPath": "github.com/twitchscience/aws_utils/uploader",
+			"Rev": "74ca435cd69fa5bfd87c24722f58885132664687"
 		}
 	]
 }
