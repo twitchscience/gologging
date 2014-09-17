@@ -1,0 +1,29 @@
+{
+	"ImportPath": "github.com/twitchscience/gologging",
+	"GoVersion": "go1.2.1",
+	"Packages": [
+		"./..."
+	],
+	"Deps": [
+		{
+			"ImportPath": "github.com/crowdmob/goamz/aws",
+			"Rev": "c5ba9ad45b6ac022326f0ff9762d6bac33ca8f88"
+		},
+		{
+			"ImportPath": "github.com/crowdmob/goamz/s3",
+			"Rev": "c5ba9ad45b6ac022326f0ff9762d6bac33ca8f88"
+		},
+		{
+			"ImportPath": "github.com/crowdmob/goamz/sqs",
+			"Rev": "c5ba9ad45b6ac022326f0ff9762d6bac33ca8f88"
+		},
+		{
+			"ImportPath": "github.com/twitchscience/aws_utils/common",
+			"Rev": "905565bfb31c38d473a91f4fae4006b7c76eefe3"
+		},
+		{
+			"ImportPath": "github.com/twitchscience/aws_utils/uploader",
+			"Rev": "905565bfb31c38d473a91f4fae4006b7c76eefe3"
+		}
+	]
+}
