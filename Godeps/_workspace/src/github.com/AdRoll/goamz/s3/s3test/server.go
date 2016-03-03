@@ -7,10 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
-	"github.com/crowdmob/goamz/s3"
+	"github.com/AdRoll/goamz/s3"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +24,8 @@ import (
 )
 
 const debug = false
+
+var rangePattern = regexp.MustCompile(`^bytes=([\d]*)-([\d]*)$`)
 
 type s3Error struct {
 	statusCode int
@@ -41,6 +44,17 @@ type action struct {
 	reqId string
 }
 
+// A Clock reports the current time.
+type Clock interface {
+	Now() time.Time
+}
+
+type realClock struct{}
+
+func (c *realClock) Now() time.Time {
+	return time.Now()
+}
+
 // Config controls the internal behaviour of the Server. A nil config is the default
 // and behaves as if all configurations assume their default behaviour. Once passed
 // to NewServer, the configuration must not be modified.
@@ -51,6 +65,14 @@ type Config struct {
 	// all other regions.
 	// http://docs.amazonwebservices.com/AmazonS3/latest/API/ErrorResponses.html
 	Send409Conflict bool
+
+	// Address on which to listen. By default, a random port is assigned by the
+	// operating system and the server listens on localhost.
+	ListenAddress string
+
+	// Clock used to set mtime when updating an object. If nil,
+	// use the real clock.
+	Clock Clock
 }
 
 func (c *Config) send409Conflict() bool {
@@ -69,13 +91,16 @@ type Server struct {
 	mu       sync.Mutex
 	buckets  map[string]*bucket
 	config   *Config
+	closed   bool
 }
 
 type bucket struct {
-	name    string
-	acl     s3.ACL
-	ctime   time.Time
-	objects map[string]*object
+	name             string
+	acl              s3.ACL
+	ctime            time.Time
+	objects          map[string]*object
+	multipartUploads map[string][]*multipartUploadPart
+	multipartMeta    map[string]http.Header
 }
 
 type object struct {
@@ -84,6 +109,27 @@ type object struct {
 	meta     http.Header // metadata to return with requests.
 	checksum []byte      // also held as Content-MD5 in meta.
 	data     []byte
+}
+
+type multipartUploadPart struct {
+	index        uint
+	data         []byte
+	etag         string
+	lastModified time.Time
+}
+
+type multipartUploadPartByIndex []*multipartUploadPart
+
+func (x multipartUploadPartByIndex) Len() int {
+	return len(x)
+}
+
+func (x multipartUploadPartByIndex) Swap(i, j int) {
+	x[i], x[j] = x[j], x[i]
+}
+
+func (x multipartUploadPartByIndex) Less(i, j int) bool {
+	return x[i].index < x[j].index
 }
 
 // A resource encapsulates the subject of an HTTP request.
@@ -97,7 +143,21 @@ type resource interface {
 }
 
 func NewServer(config *Config) (*Server, error) {
-	l, err := net.Listen("tcp", "localhost:0")
+	listenAddress := "localhost:0"
+
+	if config == nil {
+		config = &Config{}
+	}
+
+	if config.ListenAddress != "" {
+		listenAddress = config.ListenAddress
+	}
+
+	if config.Clock == nil {
+		config.Clock = &realClock{}
+	}
+
+	l, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("cannot listen on localhost: %v", err)
 	}
@@ -115,6 +175,10 @@ func NewServer(config *Config) (*Server, error) {
 
 // Quit closes down the server.
 func (srv *Server) Quit() {
+	srv.mu.Lock()
+	srv.closed = true
+	srv.mu.Unlock()
+
 	srv.listener.Close()
 }
 
@@ -138,6 +202,13 @@ func (srv *Server) serveHTTP(w http.ResponseWriter, req *http.Request) {
 
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
+
+	if srv.closed {
+		hj := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		conn.Close()
+		return
+	}
 
 	if debug {
 		log.Printf("s3test %q %q", req.Method, req.URL)
@@ -217,10 +288,8 @@ var unimplementedBucketResourceNames = map[string]bool{
 }
 
 var unimplementedObjectResourceNames = map[string]bool{
-	"uploadId": true,
-	"acl":      true,
-	"torrent":  true,
-	"uploads":  true,
+	"acl":     true,
+	"torrent": true,
 }
 
 var pathRegexp = regexp.MustCompile("/(([^/]+)(/(.*))?)?")
@@ -282,7 +351,8 @@ func (nullResource) get(a *action) interface{}    { return notAllowed() }
 func (nullResource) post(a *action) interface{}   { return notAllowed() }
 func (nullResource) delete(a *action) interface{} { return notAllowed() }
 
-const timeFormat = "2006-01-02T15:04:05.000Z07:00"
+const timeFormat = "2006-01-02T15:04:05.000Z"
+const lastModifiedTimeFormat = "Mon, 2 Jan 2006 15:04:05 GMT"
 
 type bucketResource struct {
 	name   string
@@ -325,15 +395,28 @@ func (r bucketResource) get(a *action) interface{} {
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
-	resp := &s3.ListResp{
-		Name:      r.bucket.name,
-		Prefix:    prefix,
-		Delimiter: delimiter,
-		Marker:    marker,
-		MaxKeys:   maxKeys,
+
+	type commonPrefix struct {
+		Prefix string
 	}
 
-	var prefixes []string
+	type serverListResponse struct {
+		s3.ListResp
+		CommonPrefixes []commonPrefix
+	}
+
+	resp := &serverListResponse{
+		ListResp: s3.ListResp{
+			Name:      r.bucket.name,
+			Prefix:    prefix,
+			Delimiter: delimiter,
+			Marker:    marker,
+			MaxKeys:   maxKeys,
+		},
+	}
+
+	var prefixes []commonPrefix
+	var lastName string
 	for _, obj := range objs {
 		if !strings.HasPrefix(obj.name, prefix) {
 			continue
@@ -343,7 +426,7 @@ func (r bucketResource) get(a *action) interface{} {
 		if delimiter != "" {
 			if i := strings.Index(obj.name[len(prefix):], delimiter); i >= 0 {
 				name = obj.name[:len(prefix)+i+len(delimiter)]
-				if prefixes != nil && prefixes[len(prefixes)-1] == name {
+				if prefixes != nil && prefixes[len(prefixes)-1].Prefix == name {
 					continue
 				}
 				isPrefix = true
@@ -354,14 +437,16 @@ func (r bucketResource) get(a *action) interface{} {
 		}
 		if len(resp.Contents)+len(prefixes) >= maxKeys {
 			resp.IsTruncated = true
+			resp.NextMarker = lastName
 			break
 		}
 		if isPrefix {
-			prefixes = append(prefixes, name)
+			prefixes = append(prefixes, commonPrefix{Prefix: name})
 		} else {
 			// Contents contains only keys not found in CommonPrefixes
 			resp.Contents = append(resp.Contents, obj.s3Key())
 		}
+		lastName = name
 	}
 	resp.CommonPrefixes = prefixes
 	return resp
@@ -384,7 +469,7 @@ func (s orderedObjects) Less(i, j int) bool {
 func (obj *object) s3Key() s3.Key {
 	return s3.Key{
 		Key:          obj.name,
-		LastModified: obj.mtime.Format(timeFormat),
+		LastModified: obj.mtime.UTC().Format(timeFormat),
 		Size:         int64(len(obj.data)),
 		ETag:         fmt.Sprintf(`"%x"`, obj.checksum),
 		// TODO StorageClass
@@ -420,7 +505,9 @@ func (r bucketResource) put(a *action) interface{} {
 		r.bucket = &bucket{
 			name: r.name,
 			// TODO default acl
-			objects: make(map[string]*object),
+			objects:          make(map[string]*object),
+			multipartUploads: make(map[string][]*multipartUploadPart),
+			multipartMeta:    make(map[string]http.Header),
 		}
 		a.srv.buckets[r.name] = r.bucket
 		created = true
@@ -432,9 +519,72 @@ func (r bucketResource) put(a *action) interface{} {
 	return nil
 }
 
-func (bucketResource) post(a *action) interface{} {
-	fatalf(400, "Method", "bucket POST method not available")
+func (r bucketResource) post(a *action) interface{} {
+	if _, multiDel := a.req.URL.Query()["delete"]; multiDel {
+		return r.multiDel(a)
+	}
+
+	fatalf(400, "Method", "bucket operation not supported")
 	return nil
+}
+
+func (b bucketResource) multiDel(a *action) interface{} {
+	type multiDelRequestObject struct {
+		Key       string
+		VersionId string
+	}
+
+	type multiDelRequest struct {
+		Quiet  bool
+		Object []*multiDelRequestObject
+	}
+
+	type multiDelDelete struct {
+		XMLName struct{} `xml:"Deleted"`
+		Key     string
+	}
+
+	type multiDelError struct {
+		XMLName struct{} `xml:"Error"`
+		Key     string
+		Code    string
+		Message string
+	}
+
+	type multiDelResult struct {
+		XMLName struct{} `xml:"DeleteResult"`
+		Deleted []*multiDelDelete
+		Error   []*multiDelError
+	}
+
+	req := &multiDelRequest{}
+
+	if err := xml.NewDecoder(a.req.Body).Decode(req); err != nil {
+		fatalf(400, "InvalidRequest", err.Error())
+	}
+
+	res := &multiDelResult{
+		Deleted: []*multiDelDelete{},
+		Error:   []*multiDelError{},
+	}
+
+	for _, o := range req.Object {
+		if _, exists := b.bucket.objects[o.Key]; exists {
+			delete(b.bucket.objects, o.Key)
+
+			res.Deleted = append(res.Deleted, &multiDelDelete{
+				Key: o.Key,
+			})
+		} else {
+			res.Error = append(res.Error, &multiDelError{
+				Key:     o.Key,
+				Code:    "AccessDenied",
+				Message: "Access Denied",
+			})
+		}
+	}
+
+	return res
 }
 
 // validBucketName returns whether name is a valid bucket name.
@@ -512,8 +662,33 @@ func (objr objectResource) get(a *action) interface{} {
 			h.Set(name, vals[0])
 		}
 	}
+
+	data := obj.data
+	status := http.StatusOK
 	if r := a.req.Header.Get("Range"); r != "" {
-		fatalf(400, "NotImplemented", "range unimplemented")
+		// s3 ignores invalid ranges
+		if matches := rangePattern.FindStringSubmatch(r); len(matches) == 3 {
+			var err error
+			start := 0
+			end := len(obj.data) - 1
+			if matches[1] != "" {
+				start, err = strconv.Atoi(matches[1])
+			}
+			if err == nil && matches[2] != "" {
+				end, err = strconv.Atoi(matches[2])
+			}
+			if err == nil && start >= 0 && end >= start {
+				if start >= len(obj.data) {
+					fatalf(416, "InvalidRequest", "The requested range is not satisfiable")
+				}
+				if end > len(obj.data)-1 {
+					end = len(obj.data) - 1
+				}
+				data = obj.data[start : end+1]
+				status = http.StatusPartialContent
+				h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(obj.data)))
+			}
+		}
 	}
 	// TODO Last-Modified-Since
 	// TODO If-Modified-Since
@@ -522,14 +697,19 @@ func (objr objectResource) get(a *action) interface{} {
 	// TODO If-None-Match
 	// TODO Connection: close ??
 	// TODO x-amz-request-id
-	h.Set("Content-Length", fmt.Sprint(len(obj.data)))
-	h.Set("ETag", hex.EncodeToString(obj.checksum))
-	h.Set("Last-Modified", obj.mtime.Format(time.RFC1123))
+	h.Set("Content-Length", fmt.Sprint(len(data)))
+	h.Set("ETag", "\""+hex.EncodeToString(obj.checksum)+"\"")
+	h.Set("Last-Modified", obj.mtime.UTC().Format(lastModifiedTimeFormat))
+
+	if status != http.StatusOK {
+		a.w.WriteHeader(status)
+	}
+
 	if a.req.Method == "HEAD" {
 		return nil
 	}
 	// TODO avoid holding the lock when writing data.
-	_, err := a.w.Write(obj.data)
+	_, err := a.w.Write(data)
 	if err != nil {
 		// we can't do much except just log the fact.
 		log.Printf("error writing data: %v", err)
@@ -552,13 +732,30 @@ func (objr objectResource) put(a *action) interface{} {
 	// TODO x-amz-server-side-encryption
 	// TODO x-amz-storage-class
 
-	// TODO is this correct, or should we erase all previous metadata?
-	obj := objr.object
-	if obj == nil {
-		obj = &object{
-			name: objr.name,
-			meta: make(http.Header),
+	var res interface{}
+
+	uploadId := a.req.URL.Query().Get("uploadId")
+	var partNumber uint
+
+	// Check that the upload ID is valid if this is a multipart upload
+	if uploadId != "" {
+		if _, ok := objr.bucket.multipartUploads[uploadId]; !ok {
+			fatalf(404, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.")
 		}
+
+		partNumberStr := a.req.URL.Query().Get("partNumber")
+
+		if partNumberStr == "" {
+			fatalf(400, "InvalidRequest", "Missing partNumber parameter")
+		}
+
+		number, err := strconv.ParseUint(partNumberStr, 10, 32)
+
+		if err != nil {
+			fatalf(400, "InvalidRequest", "partNumber is not a number")
+		}
+
+		partNumber = uint(number)
 	}
 
 	var expectHash []byte
@@ -583,26 +780,225 @@ func (objr objectResource) put(a *action) interface{} {
 		fatalf(400, "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header")
 	}
 
-	// PUT request has been successful - save data and metadata
-	for key, values := range a.req.Header {
-		key = http.CanonicalHeaderKey(key)
-		if metaHeaders[key] || strings.HasPrefix(key, "X-Amz-Meta-") {
-			obj.meta[key] = values
+	etag := fmt.Sprintf("\"%x\"", gotHash)
+
+	a.w.Header().Add("ETag", etag)
+
+	if uploadId == "" {
+		// For traditional uploads
+
+		// TODO is this correct, or should we erase all previous metadata?
+		obj := objr.object
+		if obj == nil {
+			obj = &object{
+				name: objr.name,
+				meta: make(http.Header),
+			}
 		}
+
+		// PUT request has been successful - save data and metadata
+		for key, values := range a.req.Header {
+			key = http.CanonicalHeaderKey(key)
+			if metaHeaders[key] || strings.HasPrefix(key, "X-Amz-Meta-") {
+				obj.meta[key] = values
+			}
+		}
+		obj.mtime = a.srv.config.Clock.Now()
+
+		if copySource := a.req.Header.Get("X-Amz-Copy-Source"); copySource != "" {
+			idx := strings.IndexByte(copySource, '/')
+
+			if idx == -1 {
+				fatalf(400, "InvalidRequest", "Wrongly formatted X-Amz-Copy-Source")
+			}
+
+			sourceBucketName := copySource[0:idx]
+			sourceKey := copySource[1+idx:]
+
+			sourceBucket := a.srv.buckets[sourceBucketName]
+
+			if sourceBucket == nil {
+				fatalf(404, "NoSuchBucket", "The specified source bucket does not exist")
+			}
+
+			sourceObject := sourceBucket.objects[sourceKey]
+
+			if sourceObject == nil {
+				fatalf(404, "NoSuchKey", "The specified source key does not exist")
+			}
+
+			if obj != sourceObject {
+				obj.data = make([]byte, len(sourceObject.data))
+				copy(obj.data, sourceObject.data)
+
+				obj.checksum = make([]byte, len(sourceObject.checksum))
+				copy(obj.checksum, sourceObject.checksum)
+
+				obj.meta = make(http.Header, len(sourceObject.meta))
+
+				for k, v := range sourceObject.meta {
+					obj.meta[k] = make([]string, len(v))
+					copy(obj.meta[k], v)
+				}
+			}
+
+			res = &s3.CopyObjectResult{
+				ETag:         etag,
+				LastModified: obj.mtime.UTC().Format(time.RFC3339),
+			}
+		} else {
+			obj.data = data
+			obj.checksum = gotHash
+		}
+		objr.bucket.objects[objr.name] = obj
+	} else {
+		// For multipart commit
+
+		parts := objr.bucket.multipartUploads[uploadId]
+		part := &multipartUploadPart{
+			index:        partNumber,
+			data:         data,
+			etag:         etag,
+			lastModified: a.srv.config.Clock.Now(),
+		}
+
+		objr.bucket.multipartUploads[uploadId] = append(parts, part)
 	}
-	obj.data = data
-	obj.checksum = gotHash
-	obj.mtime = time.Now()
-	objr.bucket.objects[objr.name] = obj
-	return nil
+
+	return res
 }
 
 func (objr objectResource) delete(a *action) interface{} {
-	delete(objr.bucket.objects, objr.name)
+	uploadId := a.req.URL.Query().Get("uploadId")
+
+	if uploadId == "" {
+		// Traditional object delete
+		delete(objr.bucket.objects, objr.name)
+	} else {
+		// Multipart commit abort
+		_, ok := objr.bucket.multipartUploads[uploadId]
+
+		if !ok {
+			fatalf(404, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.")
+		}
+
+		delete(objr.bucket.multipartUploads, uploadId)
+	}
 	return nil
 }
 
 func (objr objectResource) post(a *action) interface{} {
+	// Check if we're initializing a multipart upload
+	if _, ok := a.req.URL.Query()["uploads"]; ok {
+		type multipartInitResponse struct {
+			XMLName  struct{} `xml:"InitiateMultipartUploadResult"`
+			Bucket   string
+			Key      string
+			UploadId string
+		}
+
+		uploadId := strconv.FormatInt(rand.Int63(), 16)
+
+		objr.bucket.multipartUploads[uploadId] = []*multipartUploadPart{}
+		objr.bucket.multipartMeta[uploadId] = make(http.Header)
+		for key, values := range a.req.Header {
+			key = http.CanonicalHeaderKey(key)
+			if metaHeaders[key] || strings.HasPrefix(key, "X-Amz-Meta-") {
+				objr.bucket.multipartMeta[uploadId][key] = values
+			}
+		}
+
+		return &multipartInitResponse{
+			Bucket:   objr.bucket.name,
+			Key:      objr.name,
+			UploadId: uploadId,
+		}
+	}
+
+	// Check if we're completing a multipart upload
+	if uploadId := a.req.URL.Query().Get("uploadId"); uploadId != "" {
+		type multipartCompleteRequestPart struct {
+			XMLName    struct{} `xml:"Part"`
+			PartNumber uint
+			ETag       string
+		}
+
+		type multipartCompleteRequest struct {
+			XMLName struct{} `xml:"CompleteMultipartUpload"`
+			Part    []multipartCompleteRequestPart
+		}
+
+		type multipartCompleteResponse struct {
+			XMLName  struct{} `xml:"CompleteMultipartUploadResult"`
+			Location string
+			Bucket   string
+			Key      string
+			ETag     string
+		}
+
+		parts, ok := objr.bucket.multipartUploads[uploadId]
+
+		if !ok {
+			fatalf(404, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.")
+		}
+
+		req := &multipartCompleteRequest{}
+
+		if err := xml.NewDecoder(a.req.Body).Decode(req); err != nil {
+			fatalf(400, "InvalidRequest", err.Error())
+		}
+
+		if len(req.Part) != len(parts) {
+			fatalf(400, "InvalidRequest", fmt.Sprintf("Number of parts does not match: expected %d, received %d", len(parts), len(req.Part)))
+		}
+
+		sum := md5.New()
+		data := &bytes.Buffer{}
+		w := io.MultiWriter(sum, data)
+
+		sort.Sort(multipartUploadPartByIndex(parts))
+
+		for i, p := range parts {
+			reqPart := req.Part[i]
+
+			if reqPart.PartNumber != p.index {
+				fatalf(400, "InvalidRequest", "Bad part number")
+			}
+
+			if reqPart.ETag != p.etag {
+				fatalf(400, "InvalidRequest", fmt.Sprintf("Invalid etag for part %d", reqPart.PartNumber))
+			}
+
+			w.Write(p.data)
+		}
+
+		delete(objr.bucket.multipartUploads, uploadId)
+
+		obj := objr.object
+
+		if obj == nil {
+			obj = &object{
+				name: objr.name,
+				meta: make(http.Header),
+			}
+		}
+
+		obj.data = data.Bytes()
+		obj.checksum = sum.Sum(nil)
+		obj.mtime = time.Now()
+		objr.bucket.objects[objr.name] = obj
+		obj.meta = objr.bucket.multipartMeta[uploadId]
+
+		objectLocation := fmt.Sprintf("http://%s/%s/%s", a.srv.listener.Addr().String(), objr.bucket.name, objr.name)
+
+		return &multipartCompleteResponse{
+			Location: objectLocation,
+			Bucket:   objr.bucket.name,
+			Key:      objr.name,
+			ETag:     uploadId,
+		}
+	}
+
 	fatalf(400, "MethodNotAllowed", "The specified method is not allowed against this resource")
 	return nil
 }

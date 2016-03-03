@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AdRoll/goamz/aws"
+	"github.com/AdRoll/goamz/s3"
 	"github.com/twitchscience/aws_utils/uploader"
 	"github.com/twitchscience/gologging/gologging"
 	gen "github.com/twitchscience/gologging/key_name_generator"
-	"github.com/crowdmob/goamz/aws"
-	"github.com/crowdmob/goamz/s3"
 )
 
 const targetBucket = "twlogger-test"

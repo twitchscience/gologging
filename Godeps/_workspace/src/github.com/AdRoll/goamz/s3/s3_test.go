@@ -2,14 +2,15 @@ package s3_test
 
 import (
 	"bytes"
-	"github.com/crowdmob/goamz/aws"
-	"github.com/crowdmob/goamz/s3"
-	"github.com/crowdmob/goamz/testutil"
-	"gopkg.in/check.v1"
 	"io/ioutil"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/AdRoll/goamz/aws"
+	"github.com/AdRoll/goamz/s3"
+	"github.com/AdRoll/goamz/testutil"
+	"gopkg.in/check.v1"
 )
 
 func Test(t *testing.T) {
@@ -65,6 +66,29 @@ func (s *S) TestPutBucket(c *check.C) {
 	c.Assert(req.Header["Date"], check.Not(check.Equals), "")
 }
 
+// PutBucketWebsite docs: http://goo.gl/TpRlUy
+
+func (s *S) TestPutBucketWebsite(c *check.C) {
+	testServer.Response(200, nil, "")
+
+	b := s.s3.Bucket("bucket")
+	config := s3.WebsiteConfiguration{
+		RedirectAllRequestsTo: &s3.RedirectAllRequestsTo{HostName: "example.com"},
+	}
+	err := b.PutBucketWebsite(config)
+	c.Assert(err, check.IsNil)
+
+	req := testServer.WaitRequest()
+	body, err := ioutil.ReadAll(req.Body)
+	req.Body.Close()
+	c.Assert(err, check.IsNil)
+	c.Assert(string(body), check.Equals, BucketWebsiteConfigurationDump)
+	c.Assert(req.Method, check.Equals, "PUT")
+	c.Assert(req.URL.Path, check.Equals, "/bucket/")
+	c.Assert(req.URL.RawQuery, check.Equals, "website=")
+	c.Assert(req.Header["Date"], check.Not(check.Equals), "")
+}
+
 // Head docs: http://bit.ly/17K1ylI
 
 func (s *S) TestHead(c *check.C) {
@@ -113,6 +137,17 @@ func (s *S) TestGet(c *check.C) {
 
 	c.Assert(err, check.IsNil)
 	c.Assert(string(data), check.Equals, "content")
+}
+
+func (s *S) TestGetWithPlus(c *check.C) {
+	testServer.Response(200, nil, "content")
+
+	b := s.s3.Bucket("bucket")
+	_, err := b.Get("has+plus")
+
+	req := testServer.WaitRequest()
+	c.Assert(err, check.IsNil)
+	c.Assert(req.RequestURI, check.Equals, "http://localhost:4444/bucket/has%2Bplus")
 }
 
 func (s *S) TestURL(c *check.C) {
@@ -178,9 +213,10 @@ func (s *S) TestGetNotFound(c *check.C) {
 
 func (s *S) TestPutObject(c *check.C) {
 	testServer.Response(200, nil, "")
+	const DISPOSITION = "attachment; filename=\"0x1a2b3c.jpg\""
 
 	b := s.s3.Bucket("bucket")
-	err := b.Put("name", []byte("content"), "content-type", s3.Private, s3.Options{})
+	err := b.Put("name", []byte("content"), "content-type", s3.Private, s3.Options{ContentDisposition: DISPOSITION})
 	c.Assert(err, check.IsNil)
 
 	req := testServer.WaitRequest()
@@ -189,7 +225,69 @@ func (s *S) TestPutObject(c *check.C) {
 	c.Assert(req.Header["Date"], check.Not(check.DeepEquals), []string{""})
 	c.Assert(req.Header["Content-Type"], check.DeepEquals, []string{"content-type"})
 	c.Assert(req.Header["Content-Length"], check.DeepEquals, []string{"7"})
+	c.Assert(req.Header["Content-Disposition"], check.DeepEquals, []string{DISPOSITION})
 	//c.Assert(req.Header["Content-MD5"], gocheck.DeepEquals, "...")
+	c.Assert(req.Header["X-Amz-Acl"], check.DeepEquals, []string{"private"})
+}
+
+func (s *S) TestPutObjectSSEKMS(c *check.C) {
+	testServer.Response(200, nil, "")
+	const DISPOSITION = "attachment; filename=\"0x1a2b3c.jpg\""
+	const KMSKeyId = "1234xyz"
+
+	s.s3.Signature = aws.V4Signature
+	b := s.s3.Bucket("bucket")
+	err := b.Put("name", []byte("content"), "content-type", s3.Private, s3.Options{ContentDisposition: DISPOSITION, SSEKMS: true, SSEKMSKeyId: KMSKeyId})
+	c.Assert(err, check.IsNil)
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, check.Equals, "PUT")
+	c.Assert(req.URL.Path, check.Equals, "/bucket/name")
+	c.Assert(req.Header["Date"], check.Not(check.DeepEquals), []string{""})
+	c.Assert(req.Header["Content-Type"], check.DeepEquals, []string{"content-type"})
+	c.Assert(req.Header["Content-Length"], check.DeepEquals, []string{"7"})
+	c.Assert(req.Header["Content-Disposition"], check.DeepEquals, []string{DISPOSITION})
+	c.Assert(req.Header["X-Amz-Server-Side-Encryption"], check.DeepEquals, []string{string(s3.KMSManaged)})
+	c.Assert(req.Header["X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id"], check.DeepEquals, []string{KMSKeyId})
+	//c.Assert(req.Header["Content-MD5"], gocheck.DeepEquals, "...")
+	c.Assert(req.Header["X-Amz-Acl"], check.DeepEquals, []string{"private"})
+}
+
+func (s *S) TestPutObjectReducedRedundancy(c *check.C) {
+	testServer.Response(200, nil, "")
+
+	b := s.s3.Bucket("bucket")
+	err := b.Put("name", []byte("content"), "content-type", s3.Private, s3.Options{StorageClass: s3.ReducedRedundancy})
+	c.Assert(err, check.IsNil)
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, check.Equals, "PUT")
+	c.Assert(req.URL.Path, check.Equals, "/bucket/name")
+	c.Assert(req.Header["Date"], check.Not(check.DeepEquals), []string{""})
+	c.Assert(req.Header["Content-Type"], check.DeepEquals, []string{"content-type"})
+	c.Assert(req.Header["Content-Length"], check.DeepEquals, []string{"7"})
+	c.Assert(req.Header["X-Amz-Storage-Class"], check.DeepEquals, []string{"REDUCED_REDUNDANCY"})
+}
+
+// PutCopy docs: http://goo.gl/mhEHtA
+func (s *S) TestPutCopy(c *check.C) {
+	testServer.Response(200, nil, PutCopyResultDump)
+
+	b := s.s3.Bucket("bucket")
+	res, err := b.PutCopy("name", s3.Private, s3.CopyOptions{},
+		// 0xFC is &uuml; - 0xE9 is &eacute;
+		"source-bucket/\u00FCber-fil\u00E9.jpg")
+	c.Assert(err, check.IsNil)
+	c.Assert(res, check.DeepEquals, &s3.CopyObjectResult{
+		ETag:         `"9b2cf535f27731c974343645a3985328"`,
+		LastModified: `2009-10-28T22:32:00`})
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, check.Equals, "PUT")
+	c.Assert(req.URL.Path, check.Equals, "/bucket/name")
+	c.Assert(req.Header["Date"], check.Not(check.DeepEquals), []string{""})
+	c.Assert(req.Header["Content-Length"], check.DeepEquals, []string{"0"})
+	c.Assert(req.Header["X-Amz-Copy-Source"], check.DeepEquals, []string{`source-bucket/%C3%BCber-fil%C3%A9.jpg`})
 	c.Assert(req.Header["X-Amz-Acl"], check.DeepEquals, []string{"private"})
 }
 
@@ -378,4 +476,61 @@ func (s *S) TestExistsNotFound403(c *check.C) {
 
 	c.Assert(err, check.IsNil)
 	c.Assert(result, check.Equals, false)
+}
+
+func (s *S) TestGetService(c *check.C) {
+	testServer.Response(200, nil, GetServiceDump)
+
+	expected := s3.GetServiceResp{
+		Owner: s3.Owner{
+			ID:          "bcaf1ffd86f461ca5fb16fd081034f",
+			DisplayName: "webfile",
+		},
+		Buckets: []s3.BucketInfo{
+			s3.BucketInfo{
+				Name:         "quotes",
+				CreationDate: "2006-02-03T16:45:09.000Z",
+			},
+			s3.BucketInfo{
+				Name:         "samples",
+				CreationDate: "2006-02-03T16:41:58.000Z",
+			},
+		},
+	}
+
+	received, err := s.s3.GetService()
+
+	c.Assert(err, check.IsNil)
+	c.Assert(*received, check.DeepEquals, expected)
+}
+
+func (s *S) TestLocation(c *check.C) {
+	testServer.Response(200, nil, GetLocationUsStandard)
+	expectedUsStandard := "us-east-1"
+
+	bucketUsStandard := s.s3.Bucket("us-east-1")
+	resultUsStandard, err := bucketUsStandard.Location()
+
+	c.Assert(err, check.IsNil)
+	c.Assert(resultUsStandard, check.Equals, expectedUsStandard)
+
+	testServer.Response(200, nil, GetLocationUsWest1)
+	expectedUsWest1 := "us-west-1"
+
+	bucketUsWest1 := s.s3.Bucket("us-west-1")
+	resultUsWest1, err := bucketUsWest1.Location()
+
+	c.Assert(err, check.IsNil)
+	c.Assert(resultUsWest1, check.Equals, expectedUsWest1)
+}
+
+func (s *S) TestSupportRadosGW(c *check.C) {
+	testServer.Response(200, nil, "content")
+	s.s3.Region.Name = "generic"
+	b := s.s3.Bucket("bucket")
+	_, err := b.Get("rgw")
+
+	req := testServer.WaitRequest()
+	c.Assert(err, check.IsNil)
+	c.Assert(req.RequestURI, check.Equals, "/bucket/rgw")
 }

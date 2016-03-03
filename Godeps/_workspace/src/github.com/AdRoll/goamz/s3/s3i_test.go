@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"crypto/md5"
 	"fmt"
-	"github.com/crowdmob/goamz/aws"
-	"github.com/crowdmob/goamz/s3"
-	"github.com/crowdmob/goamz/testutil"
+	"github.com/AdRoll/goamz/aws"
+	"github.com/AdRoll/goamz/s3"
+	"github.com/AdRoll/goamz/testutil"
 	"gopkg.in/check.v1"
 	"io/ioutil"
 	"net"
@@ -185,6 +185,22 @@ func (s *ClientTests) TestBasicFunctionality(c *check.C) {
 	c.Assert(err, check.IsNil)
 	defer b.Del("name2")
 
+	result, err := b.PutCopy("name2copy", s3.Private, s3.CopyOptions{
+		ContentType:       "text/plain",
+		MetadataDirective: "REPLACE",
+	}, b.Name+"/name2")
+	c.Assert(err, check.IsNil)
+	_, err = time.Parse(time.RFC3339, result.LastModified)
+	c.Check(err, check.IsNil)
+	defer b.Del("name2copy")
+
+	// copying name2->name2 should leave data intact
+	_, err = b.PutCopy("name2", s3.Private, s3.CopyOptions{
+		ContentType:       "text/plain",
+		MetadataDirective: "REPLACE",
+	}, b.Name+"/name2")
+	c.Check(err, check.IsNil)
+
 	rc, err := b.GetReader("name2")
 	c.Assert(err, check.IsNil)
 	data, err = ioutil.ReadAll(rc)
@@ -214,6 +230,8 @@ func (s *ClientTests) TestBasicFunctionality(c *check.C) {
 	err = b.Del("name")
 	c.Assert(err, check.IsNil)
 	err = b.Del("name2")
+	c.Assert(err, check.IsNil)
+	err = b.Del("name2copy")
 	c.Assert(err, check.IsNil)
 
 	err = b.DelBucket()
@@ -409,7 +427,7 @@ func (s *ClientTests) TestMultiInitPutList(c *check.C) {
 	err := b.PutBucket(s3.Private)
 	c.Assert(err, check.IsNil)
 
-	multi, err := b.InitMulti("multi", "text/plain", s3.Private)
+	multi, err := b.InitMulti("multi", "text/plain", s3.Private, s3.Options{})
 	c.Assert(err, check.IsNil)
 	c.Assert(multi.UploadId, check.Matches, ".+")
 	defer multi.Abort()
@@ -456,7 +474,11 @@ func (s *ClientTests) TestMultiComplete(c *check.C) {
 	err := b.PutBucket(s3.Private)
 	c.Assert(err, check.IsNil)
 
-	multi, err := b.InitMulti("multi", "text/plain", s3.Private)
+	contentType := "text/plain"
+	meta := make(map[string][]string)
+	meta["X-Amz-Meta-TestField"] = []string{"testValue"}
+	options := s3.Options{ContentEncoding: "identity", ContentDisposition: "inline", Meta: meta}
+	multi, err := b.InitMulti("multi", contentType, s3.Private, options)
 	c.Assert(err, check.IsNil)
 	c.Assert(multi.UploadId, check.Matches, ".+")
 	defer multi.Abort()
@@ -484,6 +506,16 @@ func (s *ClientTests) TestMultiComplete(c *check.C) {
 		}
 	}
 	c.Assert(string(data[len(data1):]), check.Equals, string(data2))
+
+	resp, err := b.GetResponse("multi")
+	c.Assert(resp.Header.Get("Content-Type"), check.Equals, contentType)
+	c.Assert(resp.Header.Get("x-amz-acl"), check.Equals, s3.Private)
+	c.Assert(resp.Header.Get("Content-MD5"), check.Equals, options.ContentMD5)
+	c.Assert(resp.Header.Get("Content-Encoding"), check.Equals, options.ContentEncoding)
+	c.Assert(resp.Header.Get("Content-Disposition"), check.Equals, options.ContentDisposition)
+	for k, values := range meta {
+		c.Assert(resp.Header.Get(k), check.Equals, strings.Join(values, ","))
+	}
 }
 
 type multiList []*s3.Multi
@@ -511,7 +543,7 @@ func (s *ClientTests) TestListMulti(c *check.C) {
 		"multi1",
 	}
 	for _, key := range keys {
-		m, err := b.InitMulti(key, "", s3.Private)
+		m, err := b.InitMulti(key, "", s3.Private, s3.Options{})
 		c.Assert(err, check.IsNil)
 		defer m.Abort()
 	}
@@ -572,7 +604,7 @@ func (s *ClientTests) TestMultiPutAllZeroLength(c *check.C) {
 	err := b.PutBucket(s3.Private)
 	c.Assert(err, check.IsNil)
 
-	multi, err := b.InitMulti("multi", "text/plain", s3.Private)
+	multi, err := b.InitMulti("multi", "text/plain", s3.Private, s3.Options{})
 	c.Assert(err, check.IsNil)
 	defer multi.Abort()
 
