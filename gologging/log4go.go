@@ -43,6 +43,10 @@ func (u *UploadLogger) Close() {
 	u.Uploader.Close()
 }
 
-func (u *UploadLogger) Log(arg0 string, args ...interface{}) {
+func (u *UploadLogger) Logf(arg0 string, args ...interface{}) {
 	u.Logger.LogWrite(&LogRecord{fmt.Sprintf(arg0+"\n", args...)})
+}
+
+func (u *UploadLogger) Log(arg string) {
+	u.Logf("%s", arg)
 }

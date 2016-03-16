@@ -83,7 +83,30 @@ func TestLogger(t *testing.T) {
 			&testNothingBuilder{},
 		),
 	}
-	u.Log("%s %d %s", "Het", 54223, "Asdf")
+
+	str := "Mary had a little %2D lamb"
+	u.Log(str)
+
+	u.Close()
+	if b.String() != str+"\n" {
+		t.Logf("'%s' but got '%s'", str+"\n", b.String())
+		t.Fail()
+	}
+}
+
+func TestLoggerFormattedString(t *testing.T) {
+	var b bytes.Buffer
+	log := NewConsoleLogWriter(&b)
+	u := UploadLogger{
+		Logger: log,
+		Uploader: uploader.StartUploaderPool(
+			2,
+			&testErrorLogger{},
+			&testNotifier{},
+			&testNothingBuilder{},
+		),
+	}
+	u.Logf("%s %d %s", "Het", 54223, "Asdf")
 
 	u.Close()
 	if b.String() != "Het 54223 Asdf\n" {

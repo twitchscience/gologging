@@ -108,7 +108,7 @@ func main() {
 			}
 		}()
 		time.Sleep(time.Duration(int(0.8 * float64(x))))
-		logger.Log("MOAR! %d", i)
+		logger.Logf("MOAR! %d", i)
 	}
 	logger.Close()
 }
