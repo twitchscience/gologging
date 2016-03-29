@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AdRoll/goamz/aws"
-	"github.com/AdRoll/goamz/s3"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/twitchscience/aws_utils/uploader"
 	"github.com/twitchscience/gologging/gologging"
 	gen "github.com/twitchscience/gologging/key_name_generator"
@@ -59,25 +59,21 @@ var (
 
 func main() {
 	flag.Parse()
-	auth, err := aws.EnvAuth()
-	if err != nil {
-		log.Fatalln("Failed to recieve auth from env")
-	}
-	awsConnection := s3.New(
-		auth,
-		aws.USWest2,
-	)
-	bucket := awsConnection.Bucket(targetBucket)
+
 	info := gen.BuildInstanceInfo(&localInstanceFetcher{}, "basic_example", ".")
 	rotateCoordinator := gologging.NewRotateCoordinator(adjustedMaxLines, time.Hour*1)
+	uploaderBuilder := &uploader.S3UploaderBuilder{
+		Bucket: targetBucket,
+		KeyNameGenerator: &gen.EdgeKeyNameGenerator{
+			Info: info,
+		},
+		S3Manager: s3manager.NewUploader(session.New()),
+	}
 	logger, err := gologging.StartS3Logger(
 		rotateCoordinator,
 		info,
 		&stdoutNotifier{},
-		&uploader.S3UploaderBuilder{
-			Bucket:           bucket,
-			KeyNameGenerator: &gen.EdgeKeyNameGenerator{info},
-		},
+		uploaderBuilder,
 		&stderrNotifier{},
 		5,
 	)
