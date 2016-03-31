@@ -22,7 +22,7 @@ type testErrorLogger struct{}
 
 func (e *testErrorLogger) SendError(r error) {}
 
-func (b *testNothingBuilder) BuildUploader() uploader.Uploader {
+func (b *testNothingBuilder) NewUploader() uploader.Uploader {
 	return &testUploader{}
 }
 

@@ -62,18 +62,13 @@ func main() {
 
 	info := gen.BuildInstanceInfo(&localInstanceFetcher{}, "basic_example", ".")
 	rotateCoordinator := gologging.NewRotateCoordinator(adjustedMaxLines, time.Hour*1)
-	uploaderBuilder := &uploader.S3UploaderBuilder{
-		Bucket: targetBucket,
-		KeyNameGenerator: &gen.EdgeKeyNameGenerator{
-			Info: info,
-		},
-		S3Manager: s3manager.NewUploader(session.New()),
-	}
+	uploaderFactory := uploader.NewFactory(targetBucket, &gen.EdgeKeyNameGenerator{Info: info}, s3manager.NewUploader(session.New()))
+
 	logger, err := gologging.StartS3Logger(
 		rotateCoordinator,
 		info,
 		&stdoutNotifier{},
-		uploaderBuilder,
+		uploaderFactory,
 		&stderrNotifier{},
 		5,
 	)

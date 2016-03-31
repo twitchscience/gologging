@@ -16,7 +16,7 @@ func StartS3Logger(
 	coordinator *RotateCoordinator,
 	info *gen.InstanceInfo,
 	notifier uploader.NotifierHarness,
-	builder uploader.UploaderConstructor,
+	builder uploader.Factory,
 	errorLogger uploader.ErrorNotifierHarness,
 	numWorkers int,
 ) (*UploadLogger, error) {
