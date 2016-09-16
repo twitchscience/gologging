@@ -71,3 +71,38 @@ func TestProcessorKeyNameGenerator(t *testing.T) {
 		)
 	}
 }
+
+func TestReplayKeyNameGenerator(t *testing.T) {
+	runTag := "20160916123456"
+	gen := &ReplayKeyNameGenerator{
+		Info:   &InstanceInfo{
+			Service:        "test",
+			Cluster:        "testCluster",
+			AutoScaleGroup: "testCluster",
+			Node:           "testNode",
+			LoggingDir:     "",
+		},
+		RunTag: runTag,
+	}
+	expectedPrefix := runTag + "/blah/v0/testCluster/testNode."
+
+	test1 := gen.GetKeyName("blah.v0")
+	if !strings.HasPrefix(test1, expectedPrefix) {
+		t.Errorf("expected %s but got %s\n", expectedPrefix, test1)
+	}
+
+	test2 := gen.GetKeyName("/extra/blah.v0")
+	if !strings.HasPrefix(test2, expectedPrefix) {
+		t.Errorf("expected %s but got %s\n", expectedPrefix, test2)
+	}
+
+	test3 := gen.GetKeyName("/extra/blah.v0.gz")
+	if !strings.Contains(test3, expectedPrefix) {
+		t.Errorf("expected %s but got %s\n", expectedPrefix, test3)
+	}
+
+	test4 := gen.GetKeyName("/extra/blah.v0.gz")
+	if !strings.Contains(test4, expectedPrefix) {
+		t.Errorf("expected %s but got %s\n", expectedPrefix, test4)
+	}
+}
