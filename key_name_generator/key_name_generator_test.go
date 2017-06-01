@@ -44,7 +44,7 @@ func TestProcessorKeyNameGenerator(t *testing.T) {
 		)
 	}
 
-	test2 := gen.GetKeyName("/extra/blah.v0")
+	test2 := gen.GetKeyName("/extra/blah.v0.extra")
 	start2 := strings.Index(test2, "/")
 	if !strings.Contains(test2[start2:], "blah/v0/testCluster/testNode.") {
 		t.Errorf("expected %s but got %s\n",
@@ -75,7 +75,7 @@ func TestProcessorKeyNameGenerator(t *testing.T) {
 func TestReplayKeyNameGenerator(t *testing.T) {
 	runTag := "20160916123456"
 	gen := &ReplayKeyNameGenerator{
-		Info:   &InstanceInfo{
+		Info: &InstanceInfo{
 			Service:        "test",
 			Cluster:        "testCluster",
 			AutoScaleGroup: "testCluster",
