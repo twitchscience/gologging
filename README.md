@@ -1,3 +1,5 @@
+***NOTE: This project is no longer being updated publicly.***
+
 # Go Logging
 
 This project is the crux of our stats pipeline. It contains structures to write and
